@@ -1,66 +1,113 @@
-## Foundry
+# Land Registry Smart Contract
 
-**Foundry is a blazing fast, portable and modular toolkit for Ethereum application development written in Rust.**
+A comprehensive, upgradeable smart contract for managing land registration, ownership transfers, and payments on the blockchain.
 
-Foundry consists of:
+## Features
 
-- **Forge**: Ethereum testing framework (like Truffle, Hardhat and DappTools).
-- **Cast**: Swiss army knife for interacting with EVM smart contracts, sending transactions and getting chain data.
-- **Anvil**: Local Ethereum node, akin to Ganache, Hardhat Network.
-- **Chisel**: Fast, utilitarian, and verbose solidity REPL.
+- **Land Registration**: Admin can register land parcels with IPFS hash, document hash, and pricing
+- **Exclusive Land Locking**: Buyers can lock land parcels to prevent race conditions
+- **Flexible Payment System**: Support for installments via ERC-20 tokens
+- **Hybrid Payments**: Both crypto (ERC-20) and bank transfer payments with on-chain verification
+- **Dual Approval Mechanism**: Seller approval required for ownership transfers
+- **Configurable Refunds**: Buyers can request refunds with configurable penalty
+- **Role-Based Access Control**: Admin, Builder, Seller, and Buyer roles with proper access control
+- **Upgradeable Contract**: Uses UUPS proxy pattern for future upgrades
 
-## Documentation
+## Contract Structure
 
-https://book.getfoundry.sh/
+- **Main Contract**: `src/LandRegistryUpgradeable.sol`
+- **Tests**: `test/LandRegistry.t.sol` (unit tests) and `test/LandRegistryE2E.t.sol` (end-to-end tests)
+- **Deployment Scripts**: `script/DeployLandRegistry.s.sol`, `script/UpgradeLandRegistry.s.sol`, `script/DeployOrUpgrade.s.sol`
 
-## Usage
+## Quick Start
 
-### Build
+### Prerequisites
 
-```shell
-$ forge build
+- [Foundry](https://book.getfoundry.sh/getting-started/installation) installed
+- Node.js (for dependencies)
+
+### Installation
+
+```bash
+# Install dependencies
+forge install
+
+# Build
+forge build
+
+# Run tests
+forge test
+
+# Run tests with verbose output
+forge test -vvv
 ```
 
-### Test
+### Deployment
 
-```shell
-$ forge test
+1. Copy environment template:
+```bash
+cp env.example .env
 ```
 
-### Format
-
-```shell
-$ forge fmt
+2. Configure `.env` with your settings:
+```
+PRIVATE_KEY=your_private_key
+RPC_URL=your_rpc_url
+PAYMENT_TOKEN_ADDRESS=0x...
+UPGRADE=false
+PROXY_ADDRESS=0x... (if upgrading)
 ```
 
-### Gas Snapshots
+3. Deploy or upgrade:
+```bash
+# Using shell script
+bash script/deploy.sh
 
-```shell
-$ forge snapshot
+# Or using forge directly
+forge script script/DeployOrUpgrade.s.sol:DeployOrUpgrade --rpc-url $RPC_URL --broadcast --verify
 ```
 
-### Anvil
+## Test Coverage
 
-```shell
-$ anvil
-```
+The contract includes comprehensive test coverage:
+- **26 Unit Tests**: Covering all individual functions and edge cases
+- **7 E2E Tests**: Full workflow scenarios including:
+  - Complete crypto payment workflow
+  - Hybrid payment workflow
+  - Refund workflows
+  - Multiple lands scenarios
+  - Admin bypass scenarios
 
-### Deploy
+## Contract Functions
 
-```shell
-$ forge script script/Counter.s.sol:CounterScript --rpc-url <your_rpc_url> --private-key <your_private_key>
-```
+### Land Management
+- `registerLand()` - Register a new land parcel (Admin only)
+- `lockLandToBuyer()` - Lock land to a buyer
+- `adminUnlockLand()` - Admin can unlock land (Admin only)
 
-### Cast
+### Payments
+- `makePayment()` - Make ERC-20 token payment (installments supported)
+- `submitBankPayment()` - Submit bank payment proof
+- `verifyBankPayment()` - Verify bank payment (Builder/Admin only)
 
-```shell
-$ cast <subcommand>
-```
+### Ownership Transfer
+- `requestSellerApproval()` - Request seller approval for transfer
+- `sellerApproveTransfer()` - Seller approves transfer
+- `sellerRevokeApproval()` - Seller revokes approval
+- `adminBypassSellerApproval()` - Admin bypass (emergency only)
 
-### Help
+### Refunds
+- `requestRefund()` - Request refund with penalty
 
-```shell
-$ forge --help
-$ anvil --help
-$ cast --help
-```
+### Configuration
+- `setPenaltyBasisPoints()` - Set refund penalty percentage (Admin only)
+- `grantBuilderRole()` - Grant builder role (Admin only)
+- `revokeBuilderRole()` - Revoke builder role (Admin only)
+
+### View Functions
+- `getPaymentBreakdown()` - Get payment details
+- `getSellerApprovalStatus()` - Get seller approval status
+
+## License
+
+MIT
