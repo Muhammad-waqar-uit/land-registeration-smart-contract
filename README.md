@@ -19,6 +19,16 @@ A comprehensive, upgradeable smart contract for managing land registration, owne
 - **Tests**: `test/LandRegistry.t.sol` (unit tests) and `test/LandRegistryE2E.t.sol` (end-to-end tests)
 - **Deployment Scripts**: `script/DeployLandRegistry.s.sol`, `script/UpgradeLandRegistry.s.sol`, `script/DeployOrUpgrade.s.sol`
 
+## Deployed Contracts (Base Sepolia)
+
+The contracts have been deployed to Base Sepolia testnet:
+
+- **Land Registry Proxy**: `0xE75930E4b1386E60c15Ac7c0e4866509c0de73F6`
+- **Land Registry Implementation**: `0x7C6B7f49b6D786a3Caf46fc704054802fCB5F87e`
+- **Payment Token**: `0x4A8dFdD68Ec706C76F656bE09912E5345C6a55cc`
+
+**Blockscout Explorer**: [https://base-sepolia.blockscout.com/](https://base-sepolia.blockscout.com/)
+
 ## Quick Start
 
 ### Prerequisites

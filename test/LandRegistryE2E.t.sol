@@ -46,31 +46,31 @@ contract LandRegistryE2ETest is Test {
         registry.registerLand(seller, "QmHash123", keccak256("doc"), LAND_PRICE);
         uint256 landId = 1;
         
-        // 2. Buyer locks the land
-        vm.prank(buyer);
-        registry.lockLandToBuyer(landId);
+        // 2. Admin locks the land to buyer
+        vm.prank(admin);
+        registry.lockLandToBuyer(landId, buyer);
         (, , , , , address payable locked1) = registry.lands(landId);
         assertEq(locked1, buyer);
         
-        // 3. Buyer makes installment payments
-        vm.prank(buyer);
-        registry.makePayment(landId, 300e18);
+        // 3. Admin processes installment payments on behalf of buyer
+        vm.prank(admin);
+        registry.makePayment(landId, buyer, 300e18);
         assertEq(registry.amountPaid(landId), 300e18);
         
-        vm.prank(buyer);
-        registry.makePayment(landId, 400e18);
+        vm.prank(admin);
+        registry.makePayment(landId, buyer, 400e18);
         assertEq(registry.amountPaid(landId), 700e18);
         
-        vm.prank(buyer);
-        registry.makePayment(landId, 300e18);
+        vm.prank(admin);
+        registry.makePayment(landId, buyer, 300e18);
         assertEq(registry.amountPaid(landId), LAND_PRICE);
         
         // 4. Payment complete, approval requested
         assertTrue(registry.sellerApprovalPending(landId));
         
-        // 5. Seller approves
-        vm.prank(seller);
-        registry.sellerApproveTransfer(landId);
+        // 5. Admin approves on behalf of seller
+        vm.prank(admin);
+        registry.sellerApproveTransfer(landId, seller);
         
         // 6. Ownership transferred
         (address owner, , , , , address payable locked2) = registry.lands(landId);
@@ -87,29 +87,29 @@ contract LandRegistryE2ETest is Test {
         registry.registerLand(seller, "QmHash123", keccak256("doc"), LAND_PRICE);
         uint256 landId = 1;
         
-        // 2. Buyer locks the land
-        vm.prank(buyer);
-        registry.lockLandToBuyer(landId);
+        // 2. Admin locks the land to buyer
+        vm.prank(admin);
+        registry.lockLandToBuyer(landId, buyer);
         
-        // 3. Buyer makes crypto payment
-        vm.prank(buyer);
-        registry.makePayment(landId, 600e18);
+        // 3. Admin processes crypto payment on behalf of buyer
+        vm.prank(admin);
+        registry.makePayment(landId, buyer, 600e18);
         
-        // 4. Buyer submits bank payment proof
-        vm.prank(buyer);
-        registry.submitBankPayment(landId, 400e18, "QmBankProof123");
+        // 4. Admin submits bank payment proof on behalf of buyer
+        vm.prank(admin);
+        registry.submitBankPayment(landId, buyer, 400e18, "QmBankProof123");
         
-        // 5. Builder verifies bank payment
-        vm.prank(builder);
+        // 5. Admin verifies bank payment
+        vm.prank(admin);
         registry.verifyBankPayment(landId, true);
         
         assertEq(registry.amountPaid(landId), LAND_PRICE);
         assertEq(registry.cryptoAmountPaid(landId), 600e18);
         assertEq(registry.bankAmountPaid(landId), 400e18);
         
-        // 6. Seller approves
-        vm.prank(seller);
-        registry.sellerApproveTransfer(landId);
+        // 6. Admin approves on behalf of seller
+        vm.prank(admin);
+        registry.sellerApproveTransfer(landId, seller);
         
         // 7. Ownership transferred
         (address owner, , , , , ) = registry.lands(landId);
@@ -125,23 +125,23 @@ contract LandRegistryE2ETest is Test {
         registry.registerLand(seller, "QmHash123", keccak256("doc"), LAND_PRICE);
         uint256 landId = 1;
         
-        vm.prank(buyer);
-        registry.lockLandToBuyer(landId);
+        vm.prank(admin);
+        registry.lockLandToBuyer(landId, buyer);
         
-        // 2. Make partial payments
-        vm.prank(buyer);
-        registry.makePayment(landId, 300e18);
+        // 2. Admin processes partial payments on behalf of buyer
+        vm.prank(admin);
+        registry.makePayment(landId, buyer, 300e18);
         
-        vm.prank(buyer);
-        registry.makePayment(landId, 200e18);
+        vm.prank(admin);
+        registry.makePayment(landId, buyer, 200e18);
         
         uint256 totalPaid = 500e18;
         uint256 buyerBalanceBefore = token.balanceOf(buyer);
         uint256 adminBalanceBefore = token.balanceOf(admin);
         
-        // 3. Request refund
-        vm.prank(buyer);
-        registry.requestRefund(landId);
+        // 3. Admin processes refund on behalf of buyer
+        vm.prank(admin);
+        registry.requestRefund(landId, buyer);
         
         // 4. Verify refund
         uint256 penalty = (totalPaid * 1000) / 10000; // 10%
@@ -164,15 +164,15 @@ contract LandRegistryE2ETest is Test {
         registry.registerLand(seller, "QmHash3", keccak256("doc3"), 3000e18);
         vm.stopPrank();
         
-        // Buyer locks and pays for first land
-        vm.prank(buyer);
-        registry.lockLandToBuyer(1);
-        vm.prank(buyer);
-        registry.makePayment(1, 1000e18);
+        // Admin locks and processes payment for first land on behalf of buyer
+        vm.prank(admin);
+        registry.lockLandToBuyer(1, buyer);
+        vm.prank(admin);
+        registry.makePayment(1, buyer, 1000e18);
         
-        // Buyer locks second land (different buyer could lock 1st after refund)
-        vm.prank(buyer);
-        registry.lockLandToBuyer(2);
+        // Admin locks second land to buyer
+        vm.prank(admin);
+        registry.lockLandToBuyer(2, buyer);
         
         (, , , , , address payable locked1) = registry.lands(1);
         (, , , , , address payable locked2) = registry.lands(2);
@@ -190,10 +190,10 @@ contract LandRegistryE2ETest is Test {
         registry.registerLand(seller, "QmHash123", keccak256("doc"), LAND_PRICE);
         uint256 landId = 1;
         
-        vm.prank(buyer);
-        registry.lockLandToBuyer(landId);
-        vm.prank(buyer);
-        registry.makePayment(landId, LAND_PRICE);
+        vm.prank(admin);
+        registry.lockLandToBuyer(landId, buyer);
+        vm.prank(admin);
+        registry.makePayment(landId, buyer, LAND_PRICE);
         
         // Admin bypasses seller approval (emergency case)
         vm.prank(admin);
@@ -212,24 +212,24 @@ contract LandRegistryE2ETest is Test {
         registry.registerLand(seller, "QmHash123", keccak256("doc"), LAND_PRICE);
         uint256 landId = 1;
         
-        vm.prank(buyer);
-        registry.lockLandToBuyer(landId);
+        vm.prank(admin);
+        registry.lockLandToBuyer(landId, buyer);
         
-        // Submit bank payment
-        vm.prank(buyer);
-        registry.submitBankPayment(landId, 500e18, "invalid_proof");
+        // Admin submits bank payment proof on behalf of buyer
+        vm.prank(admin);
+        registry.submitBankPayment(landId, buyer, 500e18, "invalid_proof");
         
-        // Builder rejects
-        vm.prank(builder);
+        // Admin rejects
+        vm.prank(admin);
         registry.verifyBankPayment(landId, false);
         
         (bool submitted1, bool verified1, , , , , ) = registry.bankPayments(landId);
         assertFalse(submitted1);
         assertFalse(verified1);
         
-        // Buyer can resubmit
-        vm.prank(buyer);
-        registry.submitBankPayment(landId, 500e18, "valid_proof");
+        // Admin can resubmit on behalf of buyer
+        vm.prank(admin);
+        registry.submitBankPayment(landId, buyer, 500e18, "valid_proof");
         (bool submitted2, , , , , , ) = registry.bankPayments(landId);
         assertTrue(submitted2);
     }
@@ -246,16 +246,16 @@ contract LandRegistryE2ETest is Test {
         registry.registerLand(seller, "QmHash123", keccak256("doc"), LAND_PRICE);
         uint256 landId = 1;
         
-        vm.prank(buyer);
-        registry.lockLandToBuyer(landId);
-        vm.prank(buyer);
-        registry.makePayment(landId, 500e18);
+        vm.prank(admin);
+        registry.lockLandToBuyer(landId, buyer);
+        vm.prank(admin);
+        registry.makePayment(landId, buyer, 500e18);
         
         uint256 buyerBalanceBefore = token.balanceOf(buyer);
         
-        // Refund with new penalty rate
-        vm.prank(buyer);
-        registry.requestRefund(landId);
+        // Admin processes refund on behalf of buyer with new penalty rate
+        vm.prank(admin);
+        registry.requestRefund(landId, buyer);
         
         uint256 penalty = (500e18 * 500) / 10000; // 5%
         uint256 refund = 500e18 - penalty;

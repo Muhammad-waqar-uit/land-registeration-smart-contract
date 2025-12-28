@@ -29,6 +29,9 @@ contract LandRegistryTest is Test {
     event SellerApprovalGranted(uint256 landId, address seller);
     event BankPaymentSubmitted(uint256 landId, address buyer, uint256 amount, string proofHash);
     event BankPaymentVerified(uint256 landId, address verifier, uint256 amount);
+    event LandUpdateRequested(uint256 indexed landId, address indexed seller, bytes32 newDocumentHash);
+    event LandUpdateApproved(uint256 indexed landId, address indexed seller);
+    event LandUpdateRevoked(uint256 indexed landId, address indexed seller);
     
     function setUp() public {
         // Setup accounts
@@ -103,8 +106,8 @@ contract LandRegistryTest is Test {
     function test_LockLandToBuyer() public {
         uint256 landId = registerLand(seller, LAND_PRICE);
         
-        vm.prank(buyer);
-        registry.lockLandToBuyer(landId);
+        vm.prank(admin);
+        registry.lockLandToBuyer(landId, buyer);
         
         (, , , , , address payable locked) = registry.lands(landId);
         
@@ -115,20 +118,28 @@ contract LandRegistryTest is Test {
     function test_LockLand_AlreadyLocked() public {
         uint256 landId = registerLand(seller, LAND_PRICE);
         
-        vm.prank(buyer);
-        registry.lockLandToBuyer(landId);
+        vm.prank(admin);
+        registry.lockLandToBuyer(landId, buyer);
         
-        vm.prank(randomUser);
+        vm.prank(admin);
         vm.expectRevert("Land: Already reserved");
-        registry.lockLandToBuyer(landId);
+        registry.lockLandToBuyer(landId, randomUser);
     }
     
     function test_LockLand_AlreadyOwned() public {
         uint256 landId = registerLand(seller, 0); // Free land
         
         vm.expectRevert("Land: Already sold");
+        vm.prank(admin);
+        registry.lockLandToBuyer(landId, buyer);
+    }
+    
+    function test_LockLand_OnlyAdmin() public {
+        uint256 landId = registerLand(seller, LAND_PRICE);
+        
         vm.prank(buyer);
-        registry.lockLandToBuyer(landId);
+        vm.expectRevert();
+        registry.lockLandToBuyer(landId, buyer);
     }
     
     // ============ TEST: CRYPTO PAYMENTS ============
@@ -136,18 +147,18 @@ contract LandRegistryTest is Test {
     function test_MakePayment() public {
         uint256 landId = registerLand(seller, LAND_PRICE);
         
-        vm.prank(buyer);
-        registry.lockLandToBuyer(landId);
+        vm.prank(admin);
+        registry.lockLandToBuyer(landId, buyer);
         
         uint256 paymentAmount = 500e18;
-        vm.prank(buyer);
+        vm.prank(admin);
         
         // Payment doesn't complete total, so only PaymentReceived event
         // Use less strict event matching - check data only
         vm.expectEmit(false, false, false, true);
         emit PaymentReceived(landId, buyer, paymentAmount, false);
         
-        registry.makePayment(landId, paymentAmount);
+        registry.makePayment(landId, buyer, paymentAmount);
         
         assertEq(registry.amountPaid(landId), paymentAmount);
         assertEq(registry.cryptoAmountPaid(landId), paymentAmount);
@@ -157,42 +168,56 @@ contract LandRegistryTest is Test {
     function test_MakePayment_Installments() public {
         uint256 landId = registerLand(seller, LAND_PRICE);
         
-        vm.prank(buyer);
-        registry.lockLandToBuyer(landId);
+        vm.prank(admin);
+        registry.lockLandToBuyer(landId, buyer);
         
         // First payment
-        vm.prank(buyer);
-        registry.makePayment(landId, 300e18);
+        vm.prank(admin);
+        registry.makePayment(landId, buyer, 300e18);
         assertEq(registry.amountPaid(landId), 300e18);
         
         // Second payment
-        vm.prank(buyer);
-        registry.makePayment(landId, 400e18);
+        vm.prank(admin);
+        registry.makePayment(landId, buyer, 400e18);
         assertEq(registry.amountPaid(landId), 700e18);
         
         // Final payment
-        vm.prank(buyer);
-        registry.makePayment(landId, 300e18);
+        vm.prank(admin);
+        registry.makePayment(landId, buyer, 300e18);
         assertEq(registry.amountPaid(landId), LAND_PRICE);
     }
     
     function test_MakePayment_OnlyLockedBuyer() public {
         uint256 landId = registerLand(seller, LAND_PRICE);
         
-        vm.prank(randomUser);
-        vm.expectRevert("Payment: Only locked buyer can pay");
-        registry.makePayment(landId, 100e18);
+        vm.prank(admin);
+        registry.lockLandToBuyer(landId, buyer);
+        
+        vm.prank(admin);
+        vm.expectRevert("Buyer must be the locked buyer");
+        registry.makePayment(landId, randomUser, 100e18);
     }
     
     function test_MakePayment_ExceedsTotalPrice() public {
         uint256 landId = registerLand(seller, LAND_PRICE);
         
-        vm.prank(buyer);
-        registry.lockLandToBuyer(landId);
+        vm.prank(admin);
+        registry.lockLandToBuyer(landId, buyer);
+        
+        vm.prank(admin);
+        vm.expectRevert("Payment exceeds total price");
+        registry.makePayment(landId, buyer, LAND_PRICE + 1);
+    }
+    
+    function test_MakePayment_OnlyAdmin() public {
+        uint256 landId = registerLand(seller, LAND_PRICE);
+        
+        vm.prank(admin);
+        registry.lockLandToBuyer(landId, buyer);
         
         vm.prank(buyer);
-        vm.expectRevert("Payment exceeds total price");
-        registry.makePayment(landId, LAND_PRICE + 1);
+        vm.expectRevert();
+        registry.makePayment(landId, buyer, 100e18);
     }
     
     // ============ TEST: BANK PAYMENTS ============
@@ -200,18 +225,18 @@ contract LandRegistryTest is Test {
     function test_SubmitBankPayment() public {
         uint256 landId = registerLand(seller, LAND_PRICE);
         
-        vm.prank(buyer);
-        registry.lockLandToBuyer(landId);
+        vm.prank(admin);
+        registry.lockLandToBuyer(landId, buyer);
         
         uint256 bankAmount = 500e18;
         string memory proofHash = "QmBankProof123";
         
-        vm.prank(buyer);
+        vm.prank(admin);
         // Use less strict event matching - check data only
         vm.expectEmit(false, false, false, true);
         emit BankPaymentSubmitted(landId, buyer, bankAmount, proofHash);
         
-        registry.submitBankPayment(landId, bankAmount, proofHash);
+        registry.submitBankPayment(landId, buyer, bankAmount, proofHash);
         
         (bool submitted, , , uint256 amount, string memory hash, , ) = registry.bankPayments(landId);
         assertTrue(submitted);
@@ -222,24 +247,24 @@ contract LandRegistryTest is Test {
     function test_VerifyBankPayment() public {
         uint256 landId = registerLand(seller, LAND_PRICE);
         
-        vm.prank(buyer);
-        registry.lockLandToBuyer(landId);
+        vm.prank(admin);
+        registry.lockLandToBuyer(landId, buyer);
         
         uint256 bankAmount = 500e18;
-        vm.prank(buyer);
-        registry.submitBankPayment(landId, bankAmount, "proof");
+        vm.prank(admin);
+        registry.submitBankPayment(landId, buyer, bankAmount, "proof");
         
-        vm.prank(builder);
+        vm.prank(admin);
         // Bank payment verification doesn't complete total, so only BankPaymentVerified event
         // Use less strict matching
         vm.expectEmit(false, false, false, true);
-        emit BankPaymentVerified(landId, builder, bankAmount);
+        emit BankPaymentVerified(landId, admin, bankAmount);
         
         registry.verifyBankPayment(landId, true);
         
         (, bool verified, address verifiedBy, , , , ) = registry.bankPayments(landId);
         assertTrue(verified);
-        assertEq(verifiedBy, builder);
+        assertEq(verifiedBy, admin);
         assertEq(registry.bankAmountPaid(landId), bankAmount);
         assertEq(registry.amountPaid(landId), bankAmount);
     }
@@ -247,18 +272,43 @@ contract LandRegistryTest is Test {
     function test_VerifyBankPayment_Reject() public {
         uint256 landId = registerLand(seller, LAND_PRICE);
         
-        vm.prank(buyer);
-        registry.lockLandToBuyer(landId);
+        vm.prank(admin);
+        registry.lockLandToBuyer(landId, buyer);
         
-        vm.prank(buyer);
-        registry.submitBankPayment(landId, 500e18, "proof");
+        vm.prank(admin);
+        registry.submitBankPayment(landId, buyer, 500e18, "proof");
         
-        vm.prank(builder);
+        vm.prank(admin);
         registry.verifyBankPayment(landId, false);
         
         (bool submitted, bool verified, , , , , ) = registry.bankPayments(landId);
         assertFalse(submitted);
         assertFalse(verified);
+    }
+    
+    function test_SubmitBankPayment_OnlyAdmin() public {
+        uint256 landId = registerLand(seller, LAND_PRICE);
+        
+        vm.prank(admin);
+        registry.lockLandToBuyer(landId, buyer);
+        
+        vm.prank(buyer);
+        vm.expectRevert();
+        registry.submitBankPayment(landId, buyer, 500e18, "proof");
+    }
+    
+    function test_VerifyBankPayment_OnlyAdmin() public {
+        uint256 landId = registerLand(seller, LAND_PRICE);
+        
+        vm.prank(admin);
+        registry.lockLandToBuyer(landId, buyer);
+        
+        vm.prank(admin);
+        registry.submitBankPayment(landId, buyer, 500e18, "proof");
+        
+        vm.prank(builder);
+        vm.expectRevert();
+        registry.verifyBankPayment(landId, true);
     }
     
     // ============ TEST: DUAL APPROVAL ============
@@ -267,29 +317,29 @@ contract LandRegistryTest is Test {
         uint256 landId = registerLand(seller, LAND_PRICE);
         
         // Buyer locks and pays
-        vm.prank(buyer);
-        registry.lockLandToBuyer(landId);
+        vm.prank(admin);
+        registry.lockLandToBuyer(landId, buyer);
         
-        vm.prank(buyer);
+        vm.prank(admin);
         // Payment completes total, so both PaymentReceived and SellerApprovalRequested are emitted
         // Use less strict matching - just check data, not topics
         vm.expectEmit(false, false, false, true);
         emit PaymentReceived(landId, buyer, LAND_PRICE, false);
         vm.expectEmit(false, false, false, true);
         emit SellerApprovalRequested(landId, buyer);
-        registry.makePayment(landId, LAND_PRICE);
+        registry.makePayment(landId, buyer, LAND_PRICE);
         
         // Payment complete, approval requested
         assertTrue(registry.sellerApprovalPending(landId));
         assertFalse(registry.sellerApprovals(landId));
         
-        // Seller approves
-        vm.prank(seller);
+        // Admin approves on behalf of seller
+        vm.prank(admin);
         // Use less strict matching
         vm.expectEmit(false, false, false, true);
         emit OwnershipTransferred(landId, seller, buyer);
         
-        registry.sellerApproveTransfer(landId);
+        registry.sellerApproveTransfer(landId, seller);
         
         (address newOwner, , , , , address payable locked) = registry.lands(landId);
         assertTrue(registry.isOwned(landId));
@@ -297,51 +347,64 @@ contract LandRegistryTest is Test {
         assertEq(locked, address(0));
     }
     
-    function test_SellerApproval_OnlySeller() public {
+    function test_SellerApproval_OnlyAdmin() public {
         uint256 landId = registerLand(seller, LAND_PRICE);
         
-        vm.prank(buyer);
-        registry.lockLandToBuyer(landId);
-        vm.prank(buyer);
-        registry.makePayment(landId, LAND_PRICE);
+        vm.prank(admin);
+        registry.lockLandToBuyer(landId, buyer);
+        vm.prank(admin);
+        registry.makePayment(landId, buyer, LAND_PRICE);
         
         vm.prank(buyer);
-        vm.expectRevert("Only seller can perform this action");
-        registry.sellerApproveTransfer(landId);
+        vm.expectRevert();
+        registry.sellerApproveTransfer(landId, seller);
+    }
+    
+    function test_SellerApproval_WrongSeller() public {
+        uint256 landId = registerLand(seller, LAND_PRICE);
+        
+        vm.prank(admin);
+        registry.lockLandToBuyer(landId, buyer);
+        vm.prank(admin);
+        registry.makePayment(landId, buyer, LAND_PRICE);
+        
+        vm.prank(admin);
+        vm.expectRevert("Address must be the land seller");
+        registry.sellerApproveTransfer(landId, randomUser);
     }
     
     function test_SellerRevokeApproval() public {
         uint256 landId = registerLand(seller, LAND_PRICE);
         
-        vm.prank(buyer);
-        registry.lockLandToBuyer(landId);
-        vm.prank(buyer);
-        registry.makePayment(landId, LAND_PRICE);
+        vm.prank(admin);
+        registry.lockLandToBuyer(landId, buyer);
+        vm.prank(admin);
+        registry.makePayment(landId, buyer, LAND_PRICE);
         
         // Approval is pending but not yet approved
         assertTrue(registry.sellerApprovalPending(landId));
         assertFalse(registry.sellerApprovals(landId));
         
-        // Seller revokes before approving (can revoke when pending)
-        vm.prank(seller);
-        registry.sellerRevokeApproval(landId);
+        // Admin revokes on behalf of seller before approving (can revoke when pending)
+        vm.prank(admin);
+        registry.sellerRevokeApproval(landId, seller);
         
         assertFalse(registry.sellerApprovalPending(landId));
         assertFalse(registry.sellerApprovals(landId));
         
         // Now try to revoke again - should fail
-        vm.prank(seller);
+        vm.prank(admin);
         vm.expectRevert("No approval pending");
-        registry.sellerRevokeApproval(landId);
+        registry.sellerRevokeApproval(landId, seller);
     }
     
     function test_AdminBypassSellerApproval() public {
         uint256 landId = registerLand(seller, LAND_PRICE);
         
-        vm.prank(buyer);
-        registry.lockLandToBuyer(landId);
-        vm.prank(buyer);
-        registry.makePayment(landId, LAND_PRICE);
+        vm.prank(admin);
+        registry.lockLandToBuyer(landId, buyer);
+        vm.prank(admin);
+        registry.makePayment(landId, buyer, LAND_PRICE);
         
         vm.prank(admin);
         registry.adminBypassSellerApproval(landId);
@@ -356,18 +419,18 @@ contract LandRegistryTest is Test {
     function test_RequestRefund() public {
         uint256 landId = registerLand(seller, LAND_PRICE);
         
-        vm.prank(buyer);
-        registry.lockLandToBuyer(landId);
+        vm.prank(admin);
+        registry.lockLandToBuyer(landId, buyer);
         
         uint256 paymentAmount = 500e18;
-        vm.prank(buyer);
-        registry.makePayment(landId, paymentAmount);
+        vm.prank(admin);
+        registry.makePayment(landId, buyer, paymentAmount);
         
         uint256 buyerBalanceBefore = token.balanceOf(buyer);
         uint256 adminBalanceBefore = token.balanceOf(admin);
         
-        vm.prank(buyer);
-        registry.requestRefund(landId);
+        vm.prank(admin);
+        registry.requestRefund(landId, buyer);
         
         uint256 penalty = (paymentAmount * 1000) / 10000; // 10%
         uint256 refund = paymentAmount - penalty;
@@ -382,14 +445,27 @@ contract LandRegistryTest is Test {
     function test_RequestRefund_OnlyLockedBuyer() public {
         uint256 landId = registerLand(seller, LAND_PRICE);
         
-        vm.prank(buyer);
-        registry.lockLandToBuyer(landId);
-        vm.prank(buyer);
-        registry.makePayment(landId, 500e18);
+        vm.prank(admin);
+        registry.lockLandToBuyer(landId, buyer);
+        vm.prank(admin);
+        registry.makePayment(landId, buyer, 500e18);
         
-        vm.prank(randomUser);
-        vm.expectRevert("Only locked buyer can refund");
-        registry.requestRefund(landId);
+        vm.prank(admin);
+        vm.expectRevert("Buyer must be the locked buyer");
+        registry.requestRefund(landId, randomUser);
+    }
+    
+    function test_RequestRefund_OnlyAdmin() public {
+        uint256 landId = registerLand(seller, LAND_PRICE);
+        
+        vm.prank(admin);
+        registry.lockLandToBuyer(landId, buyer);
+        vm.prank(admin);
+        registry.makePayment(landId, buyer, 500e18);
+        
+        vm.prank(buyer);
+        vm.expectRevert();
+        registry.requestRefund(landId, buyer);
     }
     
     // ============ TEST: HYBRID PAYMENTS ============
@@ -397,18 +473,18 @@ contract LandRegistryTest is Test {
     function test_HybridPayment_CryptoAndBank() public {
         uint256 landId = registerLand(seller, LAND_PRICE);
         
-        vm.prank(buyer);
-        registry.lockLandToBuyer(landId);
+        vm.prank(admin);
+        registry.lockLandToBuyer(landId, buyer);
         
         // Crypto payment
-        vm.prank(buyer);
-        registry.makePayment(landId, 600e18);
+        vm.prank(admin);
+        registry.makePayment(landId, buyer, 600e18);
         
         // Bank payment
-        vm.prank(buyer);
-        registry.submitBankPayment(landId, 400e18, "proof");
+        vm.prank(admin);
+        registry.submitBankPayment(landId, buyer, 400e18, "proof");
         
-        vm.prank(builder);
+        vm.prank(admin);
         registry.verifyBankPayment(landId, true);
         
         (uint256 totalPaid, uint256 cryptoPaid, uint256 bankPaid, uint256 remaining) = 
@@ -455,10 +531,10 @@ contract LandRegistryTest is Test {
     function test_GetPaymentBreakdown() public {
         uint256 landId = registerLand(seller, LAND_PRICE);
         
-        vm.prank(buyer);
-        registry.lockLandToBuyer(landId);
-        vm.prank(buyer);
-        registry.makePayment(landId, 300e18);
+        vm.prank(admin);
+        registry.lockLandToBuyer(landId, buyer);
+        vm.prank(admin);
+        registry.makePayment(landId, buyer, 300e18);
         
         (uint256 totalPaid, uint256 cryptoPaid, uint256 bankPaid, uint256 remaining) = 
             registry.getPaymentBreakdown(landId);
@@ -472,10 +548,10 @@ contract LandRegistryTest is Test {
     function test_GetSellerApprovalStatus() public {
         uint256 landId = registerLand(seller, LAND_PRICE);
         
-        vm.prank(buyer);
-        registry.lockLandToBuyer(landId);
-        vm.prank(buyer);
-        registry.makePayment(landId, LAND_PRICE);
+        vm.prank(admin);
+        registry.lockLandToBuyer(landId, buyer);
+        vm.prank(admin);
+        registry.makePayment(landId, buyer, LAND_PRICE);
         
         (bool pending, bool approved, address sellerAddr) = registry.getSellerApprovalStatus(landId);
         
@@ -489,14 +565,101 @@ contract LandRegistryTest is Test {
     function test_AdminUnlockLand() public {
         uint256 landId = registerLand(seller, LAND_PRICE);
         
-        vm.prank(buyer);
-        registry.lockLandToBuyer(landId);
+        vm.prank(admin);
+        registry.lockLandToBuyer(landId, buyer);
         
         vm.prank(admin);
         registry.adminUnlockLand(landId);
         
         (, , , , , address payable locked) = registry.lands(landId);
         assertEq(locked, address(0));
+    }
+    
+    // ============ TEST: LAND UPDATE ============
+    
+    function test_UpdateLand_PriceOnly() public {
+        uint256 landId = registerLand(seller, LAND_PRICE);
+        
+        vm.prank(admin);
+        registry.updateLand(landId, "", bytes32(0), 2000e18);
+        
+        (, , , , uint256 newPrice, ) = registry.lands(landId);
+        assertEq(newPrice, 2000e18);
+    }
+    
+    function test_UpdateLand_IPFSOnly() public {
+        uint256 landId = registerLand(seller, LAND_PRICE);
+        
+        string memory newIPFS = "QmNewHash456";
+        vm.prank(admin);
+        registry.updateLand(landId, newIPFS, bytes32(0), 0);
+        
+        (, , string memory ipfs, , , ) = registry.lands(landId);
+        assertEq(ipfs, newIPFS);
+    }
+    
+    function test_UpdateLand_DocumentHash_RequiresApproval() public {
+        uint256 landId = registerLand(seller, LAND_PRICE);
+        
+        bytes32 newDocHash = keccak256("new_document");
+        vm.prank(admin);
+        vm.expectEmit(true, true, false, true);
+        emit LandUpdateRequested(landId, seller, newDocHash);
+        registry.updateLand(landId, "", newDocHash, 0);
+        
+        assertTrue(registry.sellerApprovalPending(landId));
+        assertFalse(registry.sellerApprovals(landId));
+        
+        // Admin approves on behalf of seller
+        vm.prank(admin);
+        vm.expectEmit(true, true, false, true);
+        emit LandUpdateApproved(landId, seller);
+        registry.sellerApproveUpdate(landId, seller);
+        
+        assertFalse(registry.sellerApprovalPending(landId));
+        assertTrue(registry.sellerApprovals(landId));
+    }
+    
+    function test_UpdateLand_OnlyAdmin() public {
+        uint256 landId = registerLand(seller, LAND_PRICE);
+        
+        vm.prank(buyer);
+        vm.expectRevert();
+        registry.updateLand(landId, "new", bytes32(0), 0);
+    }
+    
+    function test_UpdateLand_CannotUpdateSoldLand() public {
+        uint256 landId = registerLand(seller, LAND_PRICE);
+        
+        vm.prank(admin);
+        registry.lockLandToBuyer(landId, buyer);
+        vm.prank(admin);
+        registry.makePayment(landId, buyer, LAND_PRICE);
+        vm.prank(admin);
+        registry.sellerApproveTransfer(landId, seller);
+        
+        vm.prank(admin);
+        vm.expectRevert("Cannot update sold land");
+        registry.updateLand(landId, "new", bytes32(0), 0);
+    }
+    
+    function test_SellerRevokeUpdateApproval() public {
+        uint256 landId = registerLand(seller, LAND_PRICE);
+        
+        bytes32 newDocHash = keccak256("new_document");
+        vm.prank(admin);
+        registry.updateLand(landId, "", newDocHash, 0);
+        
+        assertTrue(registry.sellerApprovalPending(landId));
+        
+        // Admin revokes on behalf of seller
+        vm.prank(admin);
+        vm.expectEmit(true, true, false, true);
+        emit LandUpdateRevoked(landId, seller);
+        registry.sellerRevokeUpdateApproval(landId, seller);
+        
+        assertFalse(registry.sellerApprovalPending(landId));
+        assertFalse(registry.sellerApprovals(landId));
     }
 }
 

@@ -9,18 +9,24 @@ pragma solidity ^0.8.20;
  * 
  * @dev This contract implements:
  *      - UUPS (Universal Upgradeable Proxy Standard) pattern for upgradeability
- *      - Role-based access control (Admin, Builder, Seller, Buyer)
+ *      - Admin-only access control (backend-managed operations)
  *      - Hybrid payment system (ERC-20 crypto + bank transfers)
  *      - Dual approval mechanism (seller approval required for ownership transfer)
  *      - Configurable refund system with penalty
  * 
  * @dev WORKFLOW OVERVIEW:
- *      1. Admin registers land with details (IPFS hash, document hash, price)
- *      2. Buyer locks land to themselves (exclusive reservation)
- *      3. Buyer makes payments (crypto installments or bank transfers)
+ *      1. Admin (backend) registers land with details (IPFS hash, document hash, price, seller address)
+ *      2. Admin locks land to buyer address (exclusive reservation)
+ *      3. Admin processes payments on behalf of buyer (crypto installments or bank transfers)
  *      4. When fully paid, seller approval is requested
- *      5. Seller approves → Ownership transfers to buyer
- *      6. Buyer can request refund (with penalty) before ownership transfer
+ *      5. Admin approves on behalf of seller → Ownership transfers to buyer
+ *      6. Admin processes refund (with penalty) before ownership transfer
+ * 
+ * @dev BACKEND-MANAGED DESIGN:
+ *      - All functions are admin-only (backend controls everything)
+ *      - Addresses (buyer, seller) are passed as parameters
+ *      - No msg.sender dependencies for user operations
+ *      - Backend pays gas fees for all operations
  */
 
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
@@ -155,6 +161,15 @@ contract LandRegistryUpgradeable is
     
     /// @notice Emitted when builder/admin rejects a bank payment
     event BankPaymentRejected(uint256 landId, address verifier);
+    
+    /// @notice Emitted when admin requests land update (document hash change requires seller approval)
+    event LandUpdateRequested(uint256 indexed landId, address indexed seller, bytes32 newDocumentHash);
+    
+    /// @notice Emitted when seller approves land update
+    event LandUpdateApproved(uint256 indexed landId, address indexed seller);
+    
+    /// @notice Emitted when seller revokes update approval
+    event LandUpdateRevoked(uint256 indexed landId, address indexed seller);
 
     // ============ CONSTRUCTOR ============
     
@@ -206,44 +221,6 @@ contract LandRegistryUpgradeable is
      */
     modifier landExists(uint256 landId) {
         require(isRegistered[landId], "Land: Not registered");
-        _;
-    }
-
-    /**
-     * @notice Ensures only the buyer who locked the land can perform the action
-     * @param landId The land ID to check
-     * @dev Used for payment and refund functions
-     */
-    modifier onlyLockedBuyer(uint256 landId) {
-        require(
-            msg.sender == lands[landId].lockedTo,
-            "Payment: Only locked buyer can pay"
-        );
-        _;
-    }
-
-    /**
-     * @notice Ensures only the seller of the land can perform the action
-     * @param landId The land ID to check
-     * @dev Used for seller approval functions
-     */
-    modifier onlySeller(uint256 landId) {
-        require(
-            msg.sender == lands[landId].seller,
-            "Only seller can perform this action"
-        );
-        _;
-    }
-
-    /**
-     * @notice Ensures only builder or admin can perform the action
-     * @dev Used for bank payment verification
-     */
-    modifier onlyBuilderOrAdmin() {
-        require(
-            hasRole(BUILDER_ROLE, msg.sender) || hasRole(DEFAULT_ADMIN_ROLE, msg.sender),
-            "Only builder or admin can perform this action"
-        );
         _;
     }
 
@@ -330,54 +307,177 @@ contract LandRegistryUpgradeable is
         sellerApprovals[id] = false;
     }
 
+    // ============ LAND UPDATE ============
+
+    /**
+     * @notice Admin updates land information (with seller approval requirement for document changes)
+     * @dev Only admin can call this function
+     * @dev For document hash changes, requires seller approval (dual approval mechanism)
+     * @param landId The land ID to update
+     * @param _ipfsHash New IPFS hash (empty string to keep existing)
+     * @param _documentHash New document hash (bytes32(0) to keep existing)
+     * @param _totalPrice New total price (0 to keep existing)
+     * 
+     * @dev UPDATE FLOW:
+     *      1. Admin calls updateLand() with new values
+     *      2. If document hash changes:
+     *         - Requires seller approval (sellerApprovalPending set to true)
+     *         - Emits LandUpdateRequested event
+     *         - Seller must call sellerApproveUpdate() to complete
+     *      3. If only price or IPFS changes:
+     *         - Updates immediately (no approval needed)
+     * 
+     * @dev DUAL APPROVAL MECHANISM:
+     *      - Document hash changes require Admin + Seller approval
+     *      - Price/IPFS changes only require Admin approval
+     * 
+     * @dev EXAMPLE:
+     *      Admin updates land ID 1:
+     *      - New document hash: 0xabc...
+     *      - New price: 2000 tokens
+     *      - Result: Price updated immediately, document hash requires seller approval
+     */
+    function updateLand(
+        uint256 landId,
+        string memory _ipfsHash,
+        bytes32 _documentHash,
+        uint256 _totalPrice
+    ) external onlyRole(DEFAULT_ADMIN_ROLE) landExists(landId) {
+        require(!isOwned[landId], "Cannot update sold land");
+        
+        Land storage land = lands[landId];
+        
+        // Update IPFS hash if provided (non-empty)
+        if (bytes(_ipfsHash).length > 0) {
+            land.ipfsHash = _ipfsHash;
+        }
+        
+        // Update price if provided (non-zero)
+        if (_totalPrice > 0) {
+            land.totalPrice = _totalPrice;
+        }
+        
+        // Update document hash if provided (non-zero)
+        // This requires seller approval
+        if (_documentHash != bytes32(0)) {
+            // Check if document hash is actually changing
+            if (land.documentHash != _documentHash) {
+                // Require seller approval for document hash changes
+                sellerApprovalPending[landId] = true;
+                sellerApprovals[landId] = false;
+                land.documentHash = _documentHash; // Store new hash (pending approval)
+                emit LandUpdateRequested(landId, land.seller, _documentHash);
+            }
+        }
+    }
+
+    /**
+     * @notice Admin approves land update on behalf of seller (for document hash changes)
+     * @dev Only admin can call this function
+     * @param landId The land ID
+     * @param seller The seller address (must match land seller)
+     * 
+     * @dev APPROVAL FLOW:
+     *      1. Admin calls updateLand() with new document hash
+     *      2. Seller reviews the change (off-chain)
+     *      3. Admin calls sellerApproveUpdate() on behalf of seller
+     *      4. Update is finalized
+     */
+    function sellerApproveUpdate(uint256 landId, address seller) 
+        external 
+        onlyRole(DEFAULT_ADMIN_ROLE)
+        landExists(landId) 
+    {
+        require(seller != address(0), "Invalid seller address");
+        require(seller == lands[landId].seller, "Address must be the land seller");
+        require(sellerApprovalPending[landId], "No update pending");
+        require(!sellerApprovals[landId], "Already approved");
+        
+        sellerApprovals[landId] = true;
+        sellerApprovalPending[landId] = false;
+        
+        emit LandUpdateApproved(landId, seller);
+    }
+
+    /**
+     * @notice Admin revokes update approval on behalf of seller
+     * @dev Only admin can call this function
+     * @param landId The land ID
+     * @param seller The seller address (must match land seller)
+     */
+    function sellerRevokeUpdateApproval(uint256 landId, address seller) 
+        external 
+        onlyRole(DEFAULT_ADMIN_ROLE)
+        landExists(landId) 
+    {
+        require(seller != address(0), "Invalid seller address");
+        require(seller == lands[landId].seller, "Address must be the land seller");
+        require(sellerApprovalPending[landId], "No update pending");
+        require(!isOwned[landId], "Cannot revoke after sale");
+        
+        sellerApprovalPending[landId] = false;
+        sellerApprovals[landId] = false;
+        
+        emit LandUpdateRevoked(landId, seller);
+    }
+
     // ============ LAND LOCKING ============
 
     /**
-     * @notice Buyer locks land to themselves (exclusive reservation)
-     * @dev Prevents race conditions by ensuring only one buyer can lock at a time
+     * @notice Admin locks land to a buyer (backend-managed)
+     * @dev Only admin can call this function
+     * @dev Allows backend to lock land on behalf of users
      * @param landId The land ID to lock
+     * @param buyer The buyer address to lock the land to
      * 
      * @dev LOCKING FLOW:
      *      1. Checks land exists and is not already sold
      *      2. Checks land is not already locked by another buyer
-     *      3. Sets lockedTo to msg.sender (exclusive lock)
+     *      3. Sets lockedTo to buyer address (exclusive lock)
      *      4. Emits LandLocked event
      * 
-     * @dev IMPORTANT:
-     *      - Only one buyer can lock a land at a time
-     *      - Locked land cannot be locked by another buyer until unlocked
-     *      - Locked land can be unlocked by admin if buyer is inactive
+     * @dev USE CASE:
+     *      - Backend calls this when buyer makes reservation
+     *      - Backend pays gas fees
+     *      - Users don't need to interact with blockchain directly
      * 
      * @dev EXAMPLE:
-     *      Buyer 0xABC locks land ID 1
+     *      Admin locks land ID 1 to buyer 0xABC
      *      - lands[1].lockedTo = 0xABC
-     *      - Only 0xABC can make payments for land 1
-     *      - Other buyers cannot lock land 1 until it's unlocked
+     *      - Only payments from 0xABC will be accepted for land 1
      */
-    function lockLandToBuyer(uint256 landId) external landExists(landId) {
+    function lockLandToBuyer(uint256 landId, address buyer) 
+        external 
+        onlyRole(DEFAULT_ADMIN_ROLE) 
+        landExists(landId) 
+    {
         require(!isOwned[landId], "Land: Already sold");
         require(lands[landId].lockedTo == address(0), "Land: Already reserved");
+        require(buyer != address(0), "Invalid buyer address");
 
-        lands[landId].lockedTo = payable(msg.sender);
-        emit LandLocked(landId, msg.sender);
+        lands[landId].lockedTo = payable(buyer);
+        emit LandLocked(landId, buyer);
     }
 
     // ============ CRYPTO PAYMENTS ============
 
     /**
-     * @notice Buyer makes ERC-20 token payment (installments supported)
-     * @dev Only the buyer who locked the land can make payments
+     * @notice Admin processes ERC-20 token payment on behalf of buyer (installments supported)
+     * @dev Only admin can call this function
+     * @dev Transfers tokens from buyer to contract
      * @param landId The land ID to pay for
+     * @param buyer The buyer address making the payment
      * @param amount Payment amount in tokens
      * 
      * @dev PAYMENT FLOW:
-     *      1. Validates amount > 0
-     *      2. Checks land is not already fully paid
-     *      3. Checks payment doesn't exceed total price
-     *      4. Transfers tokens from buyer to contract
-     *      5. Updates amountPaid and cryptoAmountPaid
-     *      6. Emits PaymentReceived event
-     *      7. If fully paid, requests seller approval automatically
+     *      1. Validates buyer is the locked buyer for this land
+     *      2. Validates amount > 0
+     *      3. Checks land is not already fully paid
+     *      4. Checks payment doesn't exceed total price
+     *      5. Transfers tokens from buyer to contract
+     *      6. Updates amountPaid and cryptoAmountPaid
+     *      7. Emits PaymentReceived event
+     *      8. If fully paid, requests seller approval automatically
      * 
      * @dev INSTALLMENT SUPPORT:
      *      - Buyers can pay in multiple transactions
@@ -393,44 +493,47 @@ contract LandRegistryUpgradeable is
      *        3. If seller already approved, ownership transfers immediately
      *        4. Otherwise, waits for seller approval
      */
-    function makePayment(uint256 landId, uint256 amount)
+    function makePayment(uint256 landId, address buyer, uint256 amount)
         external
+        onlyRole(DEFAULT_ADMIN_ROLE)
         landExists(landId)
-        onlyLockedBuyer(landId)
     {
+        require(buyer != address(0), "Invalid buyer address");
+        require(buyer == lands[landId].lockedTo, "Buyer must be the locked buyer");
         require(amount > 0, "Amount must be > 0");
         require(amountPaid[landId] < lands[landId].totalPrice, "Land: Already fully paid");
         require(amountPaid[landId] + amount <= lands[landId].totalPrice, "Payment exceeds total price");
 
         require(
-            paymentToken.transferFrom(msg.sender, address(this), amount),
+            paymentToken.transferFrom(buyer, address(this), amount),
             "Token transfer failed"
         );
 
         amountPaid[landId] += amount;
         cryptoAmountPaid[landId] += amount;
 
-        // Emit payment event first
-        emit PaymentReceived(landId, msg.sender, amount, false);
+        // Emit payment event
+        emit PaymentReceived(landId, buyer, amount, false);
 
-        // Check if fully paid and handle ownership transfer (may emit SellerApprovalRequested)
+        // Check if fully paid and handle ownership transfer
         _checkAndTransferOwnership(landId);
     }
 
     // ============ BANK PAYMENTS ============
 
     /**
-     * @notice Buyer submits bank payment proof for verification
-     * @dev Buyer provides IPFS hash of bank transfer receipt
+     * @notice Admin submits bank payment proof on behalf of buyer
+     * @dev Only admin can call this function
      * @param landId The land ID to pay for
+     * @param buyer The buyer address making the payment
      * @param amount Payment amount
      * @param proofHash IPFS hash of bank payment proof document
      * 
      * @dev BANK PAYMENT FLOW:
      *      1. Buyer makes bank transfer off-chain
-     *      2. Buyer submits proof (IPFS hash) via this function
-     *      3. Builder/Admin verifies the payment off-chain
-     *      4. Builder/Admin calls verifyBankPayment() to approve
+     *      2. Backend submits proof (IPFS hash) via this function
+     *      3. Backend verifies the payment off-chain
+     *      4. Backend calls verifyBankPayment() to approve
      *      5. Payment is added to amountPaid
      *      6. If fully paid, ownership transfer process begins
      * 
@@ -438,20 +541,15 @@ contract LandRegistryUpgradeable is
      *      - Bank payments require manual verification
      *      - Previous unverified payment must be verified before submitting new one
      *      - Payment is not added to amountPaid until verified
-     * 
-     * @dev EXAMPLE:
-     *      Buyer submits bank payment:
-     *      - Amount: 500 tokens
-     *      - Proof Hash: "QmBankProof123"
-     *      - Status: Submitted (not yet verified)
-     *      - Builder verifies → verifyBankPayment(landId, true)
-     *      - Payment added to amountPaid
      */
     function submitBankPayment(
         uint256 landId,
+        address buyer,
         uint256 amount,
         string memory proofHash
-    ) external landExists(landId) onlyLockedBuyer(landId) {
+    ) external onlyRole(DEFAULT_ADMIN_ROLE) landExists(landId) {
+        require(buyer != address(0), "Invalid buyer address");
+        require(buyer == lands[landId].lockedTo, "Buyer must be the locked buyer");
         require(amount > 0, "Amount must be > 0");
         require(amountPaid[landId] + amount <= lands[landId].totalPrice, "Payment exceeds total price");
         
@@ -466,33 +564,28 @@ contract LandRegistryUpgradeable is
         bankPayment.submittedAt = block.timestamp;
         bankPayment.verifiedAt = 0;
 
-        emit BankPaymentSubmitted(landId, msg.sender, amount, proofHash);
+        emit BankPaymentSubmitted(landId, buyer, amount, proofHash);
     }
 
     /**
-     * @notice Builder or Admin verifies/rejects bank payment
-     * @dev Only builder or admin can verify bank payments
+     * @notice Admin verifies/rejects bank payment
+     * @dev Only admin can verify bank payments
      * @param landId The land ID
      * @param approved true to approve, false to reject
      * 
      * @dev VERIFICATION FLOW:
-     *      1. Builder/Admin reviews bank payment proof off-chain
+     *      1. Admin reviews bank payment proof off-chain
      *      2. If valid: calls verifyBankPayment(landId, true)
      *         - Payment added to amountPaid and bankAmountPaid
      *         - If fully paid, ownership transfer process begins
      *      3. If invalid: calls verifyBankPayment(landId, false)
      *         - Payment submission is reset
-     *         - Buyer can submit new proof
-     * 
-     * @dev SECURITY:
-     *      - Only builder or admin can verify
-     *      - Verification is one-time (cannot verify twice)
-     *      - Rejection allows buyer to submit new proof
+     *         - Can submit new proof
      */
     function verifyBankPayment(uint256 landId, bool approved) 
         external 
+        onlyRole(DEFAULT_ADMIN_ROLE)
         landExists(landId) 
-        onlyBuilderOrAdmin 
     {
         BankPayment storage bankPayment = bankPayments[landId];
         require(bankPayment.submitted, "No bank payment submitted");
@@ -521,8 +614,9 @@ contract LandRegistryUpgradeable is
     // ============ DUAL APPROVAL MECHANISM ============
 
     /**
-     * @notice Request seller approval for ownership transfer
-     * @dev Called automatically when payment is complete, but can be called manually
+     * @notice Admin requests seller approval for ownership transfer
+     * @dev Only admin can call this function
+     * @dev Called automatically when payment is complete, but can be called manually if needed
      * @param landId The land ID
      * 
      * @dev APPROVAL REQUEST FLOW:
@@ -534,9 +628,13 @@ contract LandRegistryUpgradeable is
      * 
      * @dev NOTE:
      *      - This is automatically called by _checkAndTransferOwnership() when payment completes
-     *      - Can be called manually if needed
+     *      - Can be called manually by admin if needed
      */
-    function requestSellerApproval(uint256 landId) external landExists(landId) {
+    function requestSellerApproval(uint256 landId) 
+        external 
+        onlyRole(DEFAULT_ADMIN_ROLE)
+        landExists(landId) 
+    {
         require(amountPaid[landId] >= lands[landId].totalPrice, "Payment not complete");
         require(!isOwned[landId], "Already owned");
         require(!sellerApprovalPending[landId], "Approval already requested");
@@ -546,24 +644,25 @@ contract LandRegistryUpgradeable is
     }
 
     /**
-     * @notice Seller approves ownership transfer
-     * @dev Only the seller can approve
+     * @notice Admin approves ownership transfer on behalf of seller
+     * @dev Only admin can call this function
      * @param landId The land ID
+     * @param seller The seller address (must match land seller)
      * 
      * @dev APPROVAL FLOW:
-     *      1. Seller reviews the transaction
-     *      2. Seller calls sellerApproveTransfer(landId)
+     *      1. Seller reviews the transaction (off-chain)
+     *      2. Admin calls sellerApproveTransfer() on behalf of seller
      *      3. Ownership immediately transfers to buyer
      *      4. Land is unlocked (lockedTo = address(0))
      *      5. OwnershipTransferred event is emitted
-     * 
-     * @dev SECURITY:
-     *      - Only seller can approve
-     *      - Payment must be complete
-     *      - Approval must be pending
-     *      - Cannot approve twice
      */
-    function sellerApproveTransfer(uint256 landId) external landExists(landId) onlySeller(landId) {
+    function sellerApproveTransfer(uint256 landId, address seller) 
+        external 
+        onlyRole(DEFAULT_ADMIN_ROLE)
+        landExists(landId) 
+    {
+        require(seller != address(0), "Invalid seller address");
+        require(seller == lands[landId].seller, "Address must be the land seller");
         require(amountPaid[landId] >= lands[landId].totalPrice, "Payment not complete");
         require(sellerApprovalPending[landId], "No approval requested");
         require(!sellerApprovals[landId], "Already approved");
@@ -573,32 +672,29 @@ contract LandRegistryUpgradeable is
         // Complete ownership transfer
         _completeOwnershipTransfer(landId);
 
-        emit SellerApprovalGranted(landId, msg.sender);
+        emit SellerApprovalGranted(landId, seller);
     }
 
     /**
-     * @notice Seller revokes approval (before transfer completes)
-     * @dev Seller can revoke if they change their mind before ownership transfer
+     * @notice Admin revokes approval on behalf of seller (before transfer completes)
+     * @dev Only admin can call this function
      * @param landId The land ID
-     * 
-     * @dev REVOCATION FLOW:
-     *      1. Seller calls sellerRevokeApproval(landId)
-     *      2. Approval flags are reset
-     *      3. SellerApprovalRevoked event is emitted
-     *      4. Ownership transfer is blocked until seller approves again
-     * 
-     * @dev IMPORTANT:
-     *      - Can only revoke before ownership transfer completes
-     *      - Once ownership is transferred, revocation is not possible
+     * @param seller The seller address (must match land seller)
      */
-    function sellerRevokeApproval(uint256 landId) external landExists(landId) onlySeller(landId) {
+    function sellerRevokeApproval(uint256 landId, address seller) 
+        external 
+        onlyRole(DEFAULT_ADMIN_ROLE)
+        landExists(landId) 
+    {
+        require(seller != address(0), "Invalid seller address");
+        require(seller == lands[landId].seller, "Address must be the land seller");
         require(sellerApprovalPending[landId], "No approval pending");
         require(!isOwned[landId], "Transfer already completed");
 
         sellerApprovalPending[landId] = false;
         sellerApprovals[landId] = false;
 
-        emit SellerApprovalRevoked(landId, msg.sender);
+        emit SellerApprovalRevoked(landId, seller);
     }
 
     /**
@@ -701,9 +797,10 @@ contract LandRegistryUpgradeable is
     // ============ REFUNDS ============
 
     /**
-     * @notice Buyer requests refund (with penalty)
-     * @dev Only locked buyer can request refund
+     * @notice Admin processes refund on behalf of buyer (with penalty)
+     * @dev Only admin can call this function
      * @param landId The land ID
+     * @param buyer The buyer address (must match locked buyer)
      * 
      * @dev REFUND FLOW:
      *      1. Validates buyer is the locked buyer
@@ -728,8 +825,13 @@ contract LandRegistryUpgradeable is
      *      - Refund is proportional to crypto vs bank payments
      *      - Cannot refund after ownership transfer
      */
-    function requestRefund(uint256 landId) external landExists(landId) {
-        require(msg.sender == lands[landId].lockedTo, "Only locked buyer can refund");
+    function requestRefund(uint256 landId, address buyer) 
+        external 
+        onlyRole(DEFAULT_ADMIN_ROLE)
+        landExists(landId) 
+    {
+        require(buyer != address(0), "Invalid buyer address");
+        require(buyer == lands[landId].lockedTo, "Buyer must be the locked buyer");
         uint256 totalPaid = amountPaid[landId];
         require(totalPaid > 0, "No payments to refund");
         require(!isOwned[landId], "Cannot refund after ownership transfer");
@@ -744,10 +846,10 @@ contract LandRegistryUpgradeable is
         // Reset land state first
         _resetLandState(landId);
 
-        // Process refund transfers (pass cryptoPaid as parameter)
-        _processRefundTransfers(totalPaid, refund, penalty, cryptoPaid);
+        // Process refund transfers
+        _processRefundTransfers(buyer, totalPaid, refund, penalty, cryptoPaid);
 
-        emit RefundProcessed(landId, msg.sender, refund, penalty);
+        emit RefundProcessed(landId, buyer, refund, penalty);
     }
 
     /**
@@ -773,6 +875,7 @@ contract LandRegistryUpgradeable is
     /**
      * @notice Processes refund transfers (crypto only)
      * @dev Internal helper function
+     * @param buyer The buyer address to receive refund
      * @param totalPaid Total amount paid
      * @param refund Refund amount to buyer
      * @param penalty Penalty amount to admin
@@ -786,14 +889,20 @@ contract LandRegistryUpgradeable is
      *        - Crypto refund: (900 * 800) / 1000 = 720 tokens
      *        - Penalty: (100 * 800) / 1000 = 80 tokens
      */
-    function _processRefundTransfers(uint256 totalPaid, uint256 refund, uint256 penalty, uint256 cryptoPaid) internal {
+    function _processRefundTransfers(
+        address buyer, 
+        uint256 totalPaid, 
+        uint256 refund, 
+        uint256 penalty, 
+        uint256 cryptoPaid
+    ) internal {
         if (cryptoPaid == 0) return;
         
         // Send refund (only crypto payments can be refunded on-chain)
         if (refund > 0) {
             uint256 cryptoRefund = (refund * cryptoPaid) / totalPaid;
             if (cryptoRefund > 0) {
-                require(paymentToken.transfer(msg.sender, cryptoRefund), "Refund failed");
+                require(paymentToken.transfer(buyer, cryptoRefund), "Refund failed");
             }
         }
 
