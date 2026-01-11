@@ -2,7 +2,7 @@
 pragma solidity ^0.8.20;
 
 /**
- * @title LandPaymentToken
+ * @title PaymentToken
  * @author Land Registry System
  * @notice ERC20 payment token for Land Registration System
  * @dev Standard ERC20 token using OpenZeppelin implementation
@@ -26,7 +26,7 @@ pragma solidity ^0.8.20;
 import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 
-contract LandPaymentToken is ERC20, Ownable {
+contract PaymentToken is ERC20, Ownable {
     /**
      * @notice Constructor initializes the token
      * @param _name Token name (e.g., "Land Registry Payment Token")
@@ -181,4 +181,3 @@ contract LandPaymentToken is ERC20, Ownable {
         return super.transferFrom(from, to, amount);
     }
 }
-

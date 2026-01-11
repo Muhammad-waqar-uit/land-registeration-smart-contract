@@ -3,6 +3,7 @@ pragma solidity ^0.8.20;
 
 import {Test, console} from "forge-std/Test.sol";
 import {LandPaymentToken} from "../src/LandPaymentToken.sol";
+import {IERC20Errors} from "@openzeppelin/contracts/interfaces/draft-IERC6093.sol";
 
 contract LandPaymentTokenTest is Test {
     LandPaymentToken public token;
@@ -18,10 +19,6 @@ contract LandPaymentTokenTest is Test {
     function setUp() public {
         vm.prank(owner);
         token = new LandPaymentToken("Land Payment Token", "LPT", INITIAL_SUPPLY);
-        
-        // Whitelist Land Registry
-        vm.prank(owner);
-        token.setWhitelistedSpender(landRegistry, true);
     }
     
     // ============ TEST: DEPLOYMENT ============
@@ -57,88 +54,114 @@ contract LandPaymentTokenTest is Test {
         token.mint(address(0), MINT_AMOUNT);
     }
     
-    // ============ TEST: MINT AND APPROVE ============
+    // ============ TEST: BATCH MINTING ============
     
-    function test_MintAndApprove() public {
-        vm.prank(owner);
-        token.mintAndApprove(user, MINT_AMOUNT, landRegistry);
+    function test_MintBatch() public {
+        address[] memory recipients = new address[](3);
+        recipients[0] = user;
+        recipients[1] = landRegistry;
+        recipients[2] = randomSpender;
         
-        assertEq(token.balanceOf(user), MINT_AMOUNT);
-        assertEq(token.allowance(user, landRegistry), MINT_AMOUNT);
-    }
-    
-    function test_MintAndApprove_NotWhitelisted() public {
-        vm.prank(owner);
-        vm.expectRevert("Spender must be whitelisted");
-        token.mintAndApprove(user, MINT_AMOUNT, randomSpender);
-    }
-    
-    // ============ TEST: WHITELIST ============
-    
-    function test_SetWhitelistedSpender() public {
-        vm.prank(owner);
-        token.setWhitelistedSpender(randomSpender, true);
+        uint256[] memory amounts = new uint256[](3);
+        amounts[0] = 100e18;
+        amounts[1] = 200e18;
+        amounts[2] = 300e18;
         
-        assertTrue(token.isWhitelistedSpender(randomSpender));
-    }
-    
-    function test_SetWhitelistedSpender_Remove() public {
         vm.prank(owner);
-        token.setWhitelistedSpender(landRegistry, false);
+        token.mintBatch(recipients, amounts);
         
-        assertFalse(token.isWhitelistedSpender(landRegistry));
+        assertEq(token.balanceOf(user), 100e18);
+        assertEq(token.balanceOf(landRegistry), 200e18);
+        assertEq(token.balanceOf(randomSpender), 300e18);
     }
     
-    function test_SetWhitelistedSpender_OnlyOwner() public {
+    function test_MintBatch_OnlyOwner() public {
+        address[] memory recipients = new address[](1);
+        recipients[0] = user;
+        
+        uint256[] memory amounts = new uint256[](1);
+        amounts[0] = MINT_AMOUNT;
+        
         vm.prank(user);
         vm.expectRevert();
-        token.setWhitelistedSpender(randomSpender, true);
+        token.mintBatch(recipients, amounts);
     }
     
-    // ============ TEST: AUTO-APPROVAL TRANSFER ============
+    function test_MintBatch_ArrayLengthMismatch() public {
+        address[] memory recipients = new address[](2);
+        recipients[0] = user;
+        recipients[1] = landRegistry;
+        
+        uint256[] memory amounts = new uint256[](1);
+        amounts[0] = MINT_AMOUNT;
+        
+        vm.prank(owner);
+        vm.expectRevert("Arrays length mismatch");
+        token.mintBatch(recipients, amounts);
+    }
     
-    function test_TransferFrom_WhitelistedSpender_WithoutApproval() public {
-        // Mint tokens to user
+    // ============ TEST: BURNING ============
+    
+    function test_Burn() public {
+        uint256 burnAmount = 100e18;
+        vm.prank(owner);
+        token.burn(burnAmount);
+        
+        assertEq(token.balanceOf(owner), INITIAL_SUPPLY - burnAmount);
+        assertEq(token.totalSupply(), INITIAL_SUPPLY - burnAmount);
+    }
+    
+    function test_Burn_OnlyOwner() public {
+        vm.prank(user);
+        vm.expectRevert();
+        token.burn(100e18);
+    }
+    
+    function test_Burn_InsufficientBalance() public {
+        vm.prank(owner);
+        vm.expectRevert("Insufficient balance");
+        token.burn(INITIAL_SUPPLY + 1e18);
+    }
+    
+    // ============ TEST: STANDARD TRANSFER FROM ============
+    
+    function test_TransferFrom_RequiresApproval() public {
         vm.prank(owner);
         token.mint(user, MINT_AMOUNT);
         
-        // Land Registry (whitelisted) can transfer without approval
+        // Spender needs approval
+        vm.prank(landRegistry);
+        vm.expectRevert();
+        token.transferFrom(user, landRegistry, MINT_AMOUNT);
+        
+        // After approval, it works
+        vm.prank(user);
+        token.approve(landRegistry, MINT_AMOUNT);
+        
         vm.prank(landRegistry);
         token.transferFrom(user, landRegistry, MINT_AMOUNT);
         
         assertEq(token.balanceOf(user), 0);
         assertEq(token.balanceOf(landRegistry), MINT_AMOUNT);
-        // Allowance should still be 0 (no approval needed)
-        assertEq(token.allowance(user, landRegistry), 0);
     }
     
-    function test_TransferFrom_WhitelistedSpender_InsufficientBalance() public {
+    function test_TransferFrom_InsufficientBalance() public {
         vm.prank(owner);
         token.mint(user, MINT_AMOUNT);
+        
+        vm.prank(user);
+        token.approve(landRegistry, MINT_AMOUNT + 1);
         
         vm.prank(landRegistry);
-        vm.expectRevert("ERC20: insufficient balance");
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IERC20Errors.ERC20InsufficientBalance.selector,
+                user,
+                MINT_AMOUNT,
+                MINT_AMOUNT + 1
+            )
+        );
         token.transferFrom(user, landRegistry, MINT_AMOUNT + 1);
-    }
-    
-    function test_TransferFrom_NonWhitelisted_RequiresApproval() public {
-        vm.prank(owner);
-        token.mint(user, MINT_AMOUNT);
-        
-        // Random spender needs approval
-        vm.prank(randomSpender);
-        vm.expectRevert();
-        token.transferFrom(user, randomSpender, MINT_AMOUNT);
-        
-        // After approval, it works
-        vm.prank(user);
-        token.approve(randomSpender, MINT_AMOUNT);
-        
-        vm.prank(randomSpender);
-        token.transferFrom(user, randomSpender, MINT_AMOUNT);
-        
-        assertEq(token.balanceOf(user), 0);
-        assertEq(token.balanceOf(randomSpender), MINT_AMOUNT);
     }
     
     // ============ TEST: STANDARD ERC20 ============
@@ -160,38 +183,28 @@ contract LandPaymentTokenTest is Test {
     
     // ============ TEST: E2E PAYMENT FLOW ============
     
-    function test_E2E_PaymentFlow_WithAutoApproval() public {
-        // 1. Admin mints tokens to user with auto-approval
-        vm.prank(owner);
-        token.mintAndApprove(user, MINT_AMOUNT, landRegistry);
-        
-        assertEq(token.balanceOf(user), MINT_AMOUNT);
-        assertEq(token.allowance(user, landRegistry), MINT_AMOUNT);
-        
-        // 2. Land Registry can immediately deduct payment
-        uint256 paymentAmount = 500e18;
-        vm.prank(landRegistry);
-        token.transferFrom(user, landRegistry, paymentAmount);
-        
-        assertEq(token.balanceOf(user), MINT_AMOUNT - paymentAmount);
-        assertEq(token.balanceOf(landRegistry), paymentAmount);
-    }
-    
-    function test_E2E_PaymentFlow_Whitelisted_NoApprovalNeeded() public {
-        // 1. Admin mints tokens to user (no approval)
+    function test_E2E_PaymentFlow() public {
+        // 1. Admin mints tokens to user
         vm.prank(owner);
         token.mint(user, MINT_AMOUNT);
         
         assertEq(token.balanceOf(user), MINT_AMOUNT);
-        assertEq(token.allowance(user, landRegistry), 0); // No approval
+        assertEq(token.allowance(user, landRegistry), 0);
         
-        // 2. Land Registry can still deduct (whitelisted)
+        // 2. User approves Land Registry to spend tokens
+        vm.prank(user);
+        token.approve(landRegistry, MINT_AMOUNT);
+        
+        assertEq(token.allowance(user, landRegistry), MINT_AMOUNT);
+        
+        // 3. Land Registry deducts payment
         uint256 paymentAmount = 500e18;
         vm.prank(landRegistry);
         token.transferFrom(user, landRegistry, paymentAmount);
         
         assertEq(token.balanceOf(user), MINT_AMOUNT - paymentAmount);
         assertEq(token.balanceOf(landRegistry), paymentAmount);
+        assertEq(token.allowance(user, landRegistry), MINT_AMOUNT - paymentAmount);
     }
 }
 

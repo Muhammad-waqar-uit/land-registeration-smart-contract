@@ -95,6 +95,55 @@ contract LandRegistryUpgradeable is
     /// @notice Auto-incrementing land ID counter
     uint256 public nextLandId;
 
+    // ============ BUILDER REGISTRY ============
+    
+    /**
+     * @notice Builder information structure
+     * @dev Stores builder license information on-chain
+     */
+    struct BuilderInfo {
+        address builderAddress;       // Builder's wallet address
+        string licenseNumber;         // Builder's license number
+        bool isRegistered;            // Whether builder is registered
+        uint256 registeredAt;         // Block timestamp when registered
+    }
+    
+    /// @notice Builder registry - maps builder address to BuilderInfo
+    mapping(address => BuilderInfo) public builders;
+    
+    /// @notice License number to builder address mapping (for uniqueness check)
+    mapping(string => address) public licenseToBuilder;
+
+    // ============ AGREEMENT & OWNERSHIP DOCUMENT STORAGE ============
+    
+    /**
+     * @notice Agreement hash structure
+     * @dev Stores signed agreement document hashes separately from land document hash
+     */
+    struct AgreementHash {
+        bytes32 agreementHash;        // SHA-256 hash of signed agreement
+        string agreementIPFSHash;     // IPFS hash of agreement document
+        uint256 storedAt;             // Block timestamp when stored
+        bool exists;                  // Whether agreement hash exists
+    }
+    
+    /**
+     * @notice Ownership document hash structure
+     * @dev Stores final ownership document hash (separate from initial agreement)
+     */
+    struct OwnershipDocumentHash {
+        bytes32 documentHash;         // SHA-256 hash of ownership document
+        string documentIPFSHash;      // IPFS hash of ownership document
+        uint256 storedAt;             // Block timestamp when stored
+        bool exists;                  // Whether ownership document hash exists
+    }
+    
+    /// @notice Agreement hash registry - maps landId to AgreementHash
+    mapping(uint256 => AgreementHash) public agreementHashes;
+    
+    /// @notice Ownership document hash registry - maps landId to OwnershipDocumentHash
+    mapping(uint256 => OwnershipDocumentHash) public ownershipDocumentHashes;
+
     // Payment tracking (stored separately to reduce struct size and avoid stack too deep errors)
     /// @notice Total amount paid (crypto + bank) for each land
     mapping(uint256 => uint256) public amountPaid;
@@ -170,6 +219,15 @@ contract LandRegistryUpgradeable is
     
     /// @notice Emitted when seller revokes update approval
     event LandUpdateRevoked(uint256 indexed landId, address indexed seller);
+    
+    /// @notice Emitted when a builder is registered
+    event BuilderRegistered(address indexed builder, string licenseNumber, uint256 registeredAt);
+    
+    /// @notice Emitted when agreement hash is stored
+    event AgreementHashStored(uint256 indexed landId, bytes32 agreementHash, string agreementIPFSHash, uint256 storedAt);
+    
+    /// @notice Emitted when ownership document hash is stored
+    event OwnershipDocumentHashStored(uint256 indexed landId, bytes32 documentHash, string documentIPFSHash, uint256 storedAt);
 
     // ============ CONSTRUCTOR ============
     
@@ -254,6 +312,88 @@ contract LandRegistryUpgradeable is
      */
     function revokeBuilderRole(address builder) external onlyRole(DEFAULT_ADMIN_ROLE) {
         _revokeRole(BUILDER_ROLE, builder);
+    }
+
+    /**
+     * @notice Register a builder with license information (admin only)
+     * @dev Stores builder license number on-chain for verification
+     * @param builderAddress Builder's wallet address
+     * @param licenseNumber Builder's unique license number
+     * 
+     * @dev REGISTRATION FLOW:
+     *      1. Admin calls this function after verifying builder off-chain
+     *      2. License number must be unique
+     *      3. Builder address cannot be registered twice
+     *      4. Stores builder info in builders mapping
+     *      5. Stores license-to-builder mapping for uniqueness
+     *      6. Emits BuilderRegistered event
+     * 
+     * @dev NOTE:
+     *      - This is separate from grantBuilderRole()
+     *      - grantBuilderRole() grants permissions
+     *      - registerBuilder() stores license information
+     *      - Both should be called when verifying a builder
+     */
+    function registerBuilder(address builderAddress, string memory licenseNumber) 
+        external 
+        onlyRole(DEFAULT_ADMIN_ROLE) 
+    {
+        require(builderAddress != address(0), "Invalid builder address");
+        require(bytes(licenseNumber).length > 0, "License number required");
+        require(!builders[builderAddress].isRegistered, "Builder already registered");
+        require(licenseToBuilder[licenseNumber] == address(0), "License number already registered");
+
+        BuilderInfo storage builder = builders[builderAddress];
+        builder.builderAddress = builderAddress;
+        builder.licenseNumber = licenseNumber;
+        builder.isRegistered = true;
+        builder.registeredAt = block.timestamp;
+
+        licenseToBuilder[licenseNumber] = builderAddress;
+
+        emit BuilderRegistered(builderAddress, licenseNumber, block.timestamp);
+    }
+
+    /**
+     * @notice Get builder information by address
+     * @param builderAddress Builder's wallet address
+     * @return builderAddress Builder's address
+     * @return licenseNumber Builder's license number
+     * @return isRegistered Whether builder is registered
+     * @return registeredAt Block timestamp when registered
+     */
+    function getBuilderInfo(address builderAddress)
+        external
+        view
+        returns (
+            address,
+            string memory,
+            bool,
+            uint256
+        )
+    {
+        BuilderInfo storage builder = builders[builderAddress];
+        return (
+            builder.builderAddress,
+            builder.licenseNumber,
+            builder.isRegistered,
+            builder.registeredAt
+        );
+    }
+
+    /**
+     * @notice Check if a license number is already registered
+     * @param licenseNumber License number to check
+     * @return registered Whether license is registered
+     * @return builderAddress Address of builder with this license (address(0) if not registered)
+     */
+    function isLicenseRegistered(string memory licenseNumber)
+        external
+        view
+        returns (bool registered, address builderAddress)
+    {
+        builderAddress = licenseToBuilder[licenseNumber];
+        registered = builderAddress != address(0);
     }
 
     // ============ LAND REGISTRATION ============
@@ -959,6 +1099,88 @@ contract LandRegistryUpgradeable is
         emit PenaltyBasisPointsUpdated(oldPenalty, _penaltyBasisPoints);
     }
 
+    // ============ AGREEMENT & OWNERSHIP DOCUMENT STORAGE ============
+
+    /**
+     * @notice Store agreement hash on blockchain (admin only)
+     * @dev Stores signed agreement document hash separately from land document hash
+     * @param landId The land ID
+     * @param agreementHash SHA-256 hash of signed agreement document
+     * @param agreementIPFSHash IPFS hash of signed agreement document
+     * 
+     * @dev AGREEMENT STORAGE FLOW:
+     *      1. Builder creates agreement and both parties sign
+     *      2. Signed agreement is uploaded to IPFS
+     *      3. Admin calls this function to store hash on-chain
+     *      4. Hash is stored in agreementHashes mapping
+     *      5. Emits AgreementHashStored event
+     * 
+     * @dev USE CASE:
+     *      - Stores initial signed agreement hash
+     *      - Separate from ownership document hash
+     *      - Immutable record of agreement terms
+     *      - Can be stored before payment starts
+     */
+    function storeAgreementHash(
+        uint256 landId,
+        bytes32 agreementHash,
+        string memory agreementIPFSHash
+    ) external onlyRole(DEFAULT_ADMIN_ROLE) landExists(landId) {
+        require(agreementHash != bytes32(0), "Invalid agreement hash");
+        require(bytes(agreementIPFSHash).length > 0, "IPFS hash required");
+
+        AgreementHash storage agreement = agreementHashes[landId];
+        agreement.agreementHash = agreementHash;
+        agreement.agreementIPFSHash = agreementIPFSHash;
+        agreement.storedAt = block.timestamp;
+        agreement.exists = true;
+
+        emit AgreementHashStored(landId, agreementHash, agreementIPFSHash, block.timestamp);
+    }
+
+    /**
+     * @notice Store ownership document hash on blockchain (admin only)
+     * @dev Stores final ownership document hash (separate from agreement hash)
+     * @param landId The land ID
+     * @param documentHash SHA-256 hash of final ownership document
+     * @param documentIPFSHash IPFS hash of ownership document
+     * 
+     * @dev OWNERSHIP DOCUMENT STORAGE FLOW:
+     *      1. After full payment and seller approval
+     *      2. Builder generates final ownership document
+     *      3. Document is uploaded to IPFS
+     *      4. Admin calls this function to store hash on-chain
+     *      5. Hash is stored in ownershipDocumentHashes mapping
+     *      6. Emits OwnershipDocumentHashStored event
+     * 
+     * @dev USE CASE:
+     *      - Stores final ownership certificate hash
+     *      - Separate from initial agreement hash
+     *      - Immutable record of ownership transfer
+     *      - Typically stored after ownership transfer completes
+     * 
+     * @dev NOTE:
+     *      - This is separate from updateLand() documentHash
+     *      - updateLand() updates the initial land document hash
+     *      - This stores the final ownership document hash
+     */
+    function storeOwnershipDocumentHash(
+        uint256 landId,
+        bytes32 documentHash,
+        string memory documentIPFSHash
+    ) external onlyRole(DEFAULT_ADMIN_ROLE) landExists(landId) {
+        require(documentHash != bytes32(0), "Invalid document hash");
+        require(bytes(documentIPFSHash).length > 0, "IPFS hash required");
+
+        OwnershipDocumentHash storage ownershipDoc = ownershipDocumentHashes[landId];
+        ownershipDoc.documentHash = documentHash;
+        ownershipDoc.documentIPFSHash = documentIPFSHash;
+        ownershipDoc.storedAt = block.timestamp;
+        ownershipDoc.exists = true;
+
+        emit OwnershipDocumentHashStored(landId, documentHash, documentIPFSHash, block.timestamp);
+    }
+
     // ============ VIEW FUNCTIONS ============
 
     /**
@@ -1017,5 +1239,61 @@ contract LandRegistryUpgradeable is
         approvalPending = sellerApprovalPending[landId];
         approved = sellerApprovals[landId];
         seller = lands[landId].seller;
+    }
+
+    /**
+     * @notice Get agreement hash for a land
+     * @param landId The land ID
+     * @return agreementHash SHA-256 hash of agreement
+     * @return agreementIPFSHash IPFS hash of agreement
+     * @return storedAt Block timestamp when stored
+     * @return exists Whether agreement hash exists
+     */
+    function getAgreementHash(uint256 landId)
+        external
+        view
+        landExists(landId)
+        returns (
+            bytes32 agreementHash,
+            string memory agreementIPFSHash,
+            uint256 storedAt,
+            bool exists
+        )
+    {
+        AgreementHash storage agreement = agreementHashes[landId];
+        return (
+            agreement.agreementHash,
+            agreement.agreementIPFSHash,
+            agreement.storedAt,
+            agreement.exists
+        );
+    }
+
+    /**
+     * @notice Get ownership document hash for a land
+     * @param landId The land ID
+     * @return documentHash SHA-256 hash of ownership document
+     * @return documentIPFSHash IPFS hash of ownership document
+     * @return storedAt Block timestamp when stored
+     * @return exists Whether ownership document hash exists
+     */
+    function getOwnershipDocumentHash(uint256 landId)
+        external
+        view
+        landExists(landId)
+        returns (
+            bytes32 documentHash,
+            string memory documentIPFSHash,
+            uint256 storedAt,
+            bool exists
+        )
+    {
+        OwnershipDocumentHash storage ownershipDoc = ownershipDocumentHashes[landId];
+        return (
+            ownershipDoc.documentHash,
+            ownershipDoc.documentIPFSHash,
+            ownershipDoc.storedAt,
+            ownershipDoc.exists
+        );
     }
 }
