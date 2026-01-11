@@ -110,9 +110,6 @@ contract LandRegistryUpgradeable is
     
     /// @notice Builder registry - maps builder address to BuilderInfo
     mapping(address => BuilderInfo) public builders;
-    
-    /// @notice License number to builder address mapping (for uniqueness check)
-    mapping(string => address) public licenseToBuilder;
 
     // ============ AGREEMENT & OWNERSHIP DOCUMENT STORAGE ============
     
@@ -318,15 +315,13 @@ contract LandRegistryUpgradeable is
      * @notice Register a builder with license information (admin only)
      * @dev Stores builder license number on-chain for verification
      * @param builderAddress Builder's wallet address
-     * @param licenseNumber Builder's unique license number
+     * @param licenseNumber Builder's license number
      * 
      * @dev REGISTRATION FLOW:
      *      1. Admin calls this function after verifying builder off-chain
-     *      2. License number must be unique
-     *      3. Builder address cannot be registered twice
-     *      4. Stores builder info in builders mapping
-     *      5. Stores license-to-builder mapping for uniqueness
-     *      6. Emits BuilderRegistered event
+     *      2. Builder address cannot be registered twice (address is unique)
+     *      3. Stores builder info in builders mapping
+     *      4. Emits BuilderRegistered event
      * 
      * @dev NOTE:
      *      - This is separate from grantBuilderRole()
@@ -341,15 +336,12 @@ contract LandRegistryUpgradeable is
         require(builderAddress != address(0), "Invalid builder address");
         require(bytes(licenseNumber).length > 0, "License number required");
         require(!builders[builderAddress].isRegistered, "Builder already registered");
-        require(licenseToBuilder[licenseNumber] == address(0), "License number already registered");
 
         BuilderInfo storage builder = builders[builderAddress];
         builder.builderAddress = builderAddress;
         builder.licenseNumber = licenseNumber;
         builder.isRegistered = true;
         builder.registeredAt = block.timestamp;
-
-        licenseToBuilder[licenseNumber] = builderAddress;
 
         emit BuilderRegistered(builderAddress, licenseNumber, block.timestamp);
     }
@@ -379,21 +371,6 @@ contract LandRegistryUpgradeable is
             builder.isRegistered,
             builder.registeredAt
         );
-    }
-
-    /**
-     * @notice Check if a license number is already registered
-     * @param licenseNumber License number to check
-     * @return registered Whether license is registered
-     * @return builderAddress Address of builder with this license (address(0) if not registered)
-     */
-    function isLicenseRegistered(string memory licenseNumber)
-        external
-        view
-        returns (bool registered, address builderAddress)
-    {
-        builderAddress = licenseToBuilder[licenseNumber];
-        registered = builderAddress != address(0);
     }
 
     // ============ LAND REGISTRATION ============
